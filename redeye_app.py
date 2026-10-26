@@ -135,7 +135,15 @@ SAFE_WHITELIST_SUFFIXES = (
     "ubuntu.com", "debian.org", "linuxmint.com",
     "amazonaws.com", "cloudfront.net", "fastly.net", "digicert.com",
     "letsencrypt.org", "ocsp.int-x3.letsencrypt.org", "ip-api.com",
-    "abuse.ch", "feodotracker.abuse.ch", "urlhaus.abuse.ch", "openphish.com"
+    "abuse.ch", "feodotracker.abuse.ch", "urlhaus.abuse.ch", "openphish.com",
+    "bing.com", "msn.com", " edgeservices.bing.com", "Nel.measure.office.net",
+    "trafficmanager.net", "edge.microsoft.com", "msedge.net", "virtualearth.net"
+)
+
+TRUSTED_ISP_KEYWORDS = (
+    "microsoft", "google", "cloudflare", "akamai", "fastly", "amazon",
+    "apple", "meta", "facebook", "github", "mozilla", "edgecast",
+    "verisign", "digicert", "let's encrypt", "quad9", "cisco", "opendns"
 )
 
 SYSTEM_IGNORE_PROCESSES = (
@@ -607,7 +615,7 @@ class ThreatIntelligenceEngine:
                         "category": f"Blocked Domain ({blocked_d})"
                     }
 
-        # 2. Check Known Safe Whitelist
+        # 2. Check Known Safe Whitelist & Trusted Cloud/Browser Infrastructure (e.g., Bing/Edge 150.171.x.x)
         if d:
             for safe_sfx in SAFE_WHITELIST_SUFFIXES:
                 if d == safe_sfx or d.endswith("." + safe_sfx):
@@ -634,11 +642,25 @@ class ThreatIntelligenceEngine:
             reason, score = self.malicious_ips[ip_str]
             return self._format_threat(score, reason)
 
+        # If IP belongs to a trusted major browser/CDN vendor (Microsoft Edge/Bing, Google, Cloudflare, Apple, etc.)
+        # and did not match any malicious domain/IP feed above, treat as safe infrastructure.
+        org_lower = (geo_info.get("org", "") + " " + geo_info.get("asn", "")).lower()
+        is_trusted_isp = any(k in org_lower for k in TRUSTED_ISP_KEYWORDS)
+        if is_trusted_isp and (not d or d == ip_str):
+            return {
+                "is_malicious": False,
+                "previously_blocked": False,
+                "risk_score": 5,
+                "stars": "★★★★★ (5/5) — TRUSTED CDN/CLOUD",
+                "severity": "SAFE",
+                "category": f"Trusted Infrastructure ({geo_info.get('org', 'Cloud')})"
+            }
+
         # 5. Heuristic Scoring for Phishing / Suspicious Web Apps
         score = 10
         reasons = []
 
-        if d:
+        if d and d != ip_str:
             # Punycode IDN homograph attack check
             if "xn--" in d:
                 score += 65
@@ -659,25 +681,22 @@ class ThreatIntelligenceEngine:
                     break
 
             # Excessive subdomains or long random hostnames typical of DGA / phishing kits
-            if d.count(".") >= 4 and len(d) > 42:
+            if d.count(".") >= 4 and len(d) > 42 and not is_trusted_isp:
                 score += 35
                 reasons.append("Suspicious Multi-Subdomain Structure")
 
-        # Unencrypted HTTP on port 80 or unusual non-standard web port
-        if port == 80:
-            score += 20
-            reasons.append("Unencrypted HTTP Connection")
-        elif port not in (80, 443):
-            score += 25
-            reasons.append(f"Non-Standard Web Port ({port})")
+        # Only add proxy/unencrypted penalties when combined with a suspicious domain or non-trusted ISP
+        if not is_trusted_isp:
+            if port == 80 and score >= 40:
+                score += 20
+                reasons.append("Unencrypted HTTP Connection")
+            elif port not in (80, 443) and score >= 40:
+                score += 25
+                reasons.append(f"Non-Standard Web Port ({port})")
 
-        # Proxy / Tor / Bulletproof Hosting IP with no reverse DNS domain
-        if geo_info.get("is_proxy"):
-            score += 55
-            reasons.append("Anonymizer / Proxy / Tor Node")
-        elif not d and geo_info.get("is_hosting") and port in (80, 8080, 8443):
-            score += 50
-            reasons.append("Direct Unverified Hosting IP Web App")
+            if geo_info.get("is_proxy") and score >= 40:
+                score += 30
+                reasons.append("Anonymizer / Proxy Relay")
 
         score = min(99, score)
         if score >= 60:
@@ -809,7 +828,7 @@ class ThreatNotificationPopup(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.setFixedSize(410, 215)
+        self.setFixedSize(455, 220)
 
         self._build_ui()
         self._position_near_clock()
@@ -942,7 +961,7 @@ class ThreatNotificationPopup(QWidget):
         self.close_site_btn.clicked.connect(self._handle_close_site)
         btn_row.addWidget(self.close_site_btn)
 
-        self.block_site_btn = QPushButton("🚫  Block & Close Site")
+        self.block_site_btn = QPushButton("🚫  Block && Close Site")
         self.block_site_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.block_site_btn.setFixedHeight(32)
         self.block_site_btn.setStyleSheet("""
@@ -1122,9 +1141,6 @@ class BrowserSiteMonitor(QThread):
 
     def inspect_connection(self, ip: str, rport: int, pid: int, proc_name: str):
         domain = self.resolver.resolve_ip(ip)
-        if not domain:
-            domain = get_active_browser_context(proc_name, pid)
-
         geo = get_ip_geo_and_isp(ip)
         rating = self.intel.evaluate_site(domain, ip, geo, port=rport)
 
