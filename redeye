@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# RedEye Cross-Platform Background Launcher (macOS Intel / Apple Silicon M-series & Linux LMDE / Debian)
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+VENV_PATH="$DIR/.redeye_venv"
+
+if [ ! -d "$VENV_PATH" ]; then
+    echo "⚙️  Creating RedEye virtual environment at $VENV_PATH..."
+    python3 -m venv "$VENV_PATH"
+    "$VENV_PATH/bin/pip" install --upgrade pip
+    "$VENV_PATH/bin/pip" install -r "$DIR/requirements.txt"
+fi
+
+# Stop any previous RedEye instance
+pkill -f redeye_app.py 2>/dev/null || true
+
+LOG_FILE="$HOME/redeye.log"
+nohup "$VENV_PATH/bin/python3" "$DIR/redeye_app.py" "$@" > "$LOG_FILE" 2>&1 &
+
+echo "👁️  RedEye Malicious Site Shield started silently near the clock."
+echo "📄 Malicious Sites CSV Log: $HOME/redeye_malicious_sites.csv"
+echo "🛠️  Diagnostic Log: $LOG_FILE"
